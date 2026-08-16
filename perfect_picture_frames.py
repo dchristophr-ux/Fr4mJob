@@ -16,6 +16,8 @@ import base64
 from io import BytesIO
 from PIL import Image
 import os
+import re
+import time
 
 # ─────────────────────────────────────────────────────────────
 # MODEL CONFIGURATION
@@ -91,6 +93,64 @@ Be specific, actionable, budget-conscious, and enthusiastic about helping solve
 their odd-shaped framing challenge!"""
 
 
+def _parse_retry_seconds(err_text: str) -> float:
+    """Pull the 'try again in Xs' hint out of a Groq rate-limit message."""
+    m = re.search(r"try again in ([\d.]+)s", err_text)
+    if m:
+        return min(float(m.group(1)) + 0.5, 20.0)
+    return 6.0
+
+
+def _create_with_retry(client, request_kwargs, max_attempts: int = 3):
+    """Call the API, retrying gracefully on rate limits and stripping
+    reasoning_effort if the model rejects it."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.chat.completions.create(**request_kwargs)
+        except Exception as e:
+            err = str(e)
+            # Model doesn't accept reasoning_effort -> drop it and retry now
+            if "reasoning_effort" in err and "reasoning_effort" in request_kwargs:
+                request_kwargs.pop("reasoning_effort", None)
+                continue
+            # Rate limited -> wait the suggested time and retry
+            if "429" in err or "rate_limit" in err.lower():
+                if attempt < max_attempts:
+                    wait = _parse_retry_seconds(err)
+                    st.info(f"⏳ Our AI is a bit busy — retrying in {wait:.0f} seconds...")
+                    time.sleep(wait)
+                    continue
+            raise
+    raise RuntimeError("Request failed after retries")
+
+
+def _friendly_error(e: Exception) -> str:
+    """Turn raw API errors into calm, useful messages."""
+    err = str(e)
+    if "429" in err or "rate_limit" in err.lower():
+        return (
+            "⏳ **Our AI is getting a lot of requests right now.**\n\n"
+            "Please wait about a minute and click the button again. "
+            "Photo analysis is the most demanding request, so if you're in a hurry, "
+            "the Dimensions tab responds fastest."
+        )
+    if "decommission" in err.lower() or "not found" in err.lower() or "does not exist" in err.lower():
+        return (
+            "🔧 **The AI model needs updating.**\n\n"
+            "The configured model is no longer available. Check "
+            "https://console.groq.com/docs/deprecations for the current replacement "
+            "and update the model constants at the top of this file."
+        )
+    if "401" in err or "invalid api key" in err.lower() or "authentication" in err.lower():
+        return "🔑 **API key problem.** Please check that your Groq API key is correct and active."
+    return (
+        "❌ **Something went wrong getting recommendations.**\n\n"
+        "Please try again in a moment. If it keeps happening, try a different "
+        "photo or the Dimensions tab.\n\n"
+        f"<details><summary>Technical details</summary><code>{err}</code></details>"
+    )
+
+
 def analyze_with_groq(prompt: str, image_base64: str = None) -> str:
     """Send a request to Groq and return frame recommendations.
 
@@ -141,12 +201,7 @@ def analyze_with_groq(prompt: str, image_base64: str = None) -> str:
         if image_base64:
             request_kwargs["reasoning_effort"] = "none"
 
-        try:
-            response = client.chat.completions.create(**request_kwargs)
-        except Exception:
-            # If the model rejects reasoning_effort, retry without it
-            request_kwargs.pop("reasoning_effort", None)
-            response = client.chat.completions.create(**request_kwargs)
+        response = _create_with_retry(client, request_kwargs)
 
         msg = response.choices[0].message
         text = (msg.content or "").strip()
@@ -165,12 +220,7 @@ def analyze_with_groq(prompt: str, image_base64: str = None) -> str:
         return text
 
     except Exception as e:
-        return (
-            f"❌ Error getting recommendations: {str(e)}\n\n"
-            "If this mentions a model being decommissioned, check "
-            "https://console.groq.com/docs/deprecations for the current "
-            "replacement and update the model constants at the top of this file."
-        )
+        return _friendly_error(e)
 
 
 # Custom CSS with 3P branding
@@ -323,7 +373,7 @@ with st.sidebar:
     st.markdown("""
     <div style='text-align: center; color: #888; font-size: 0.85rem;'>
         <p><strong>Perfect Picture Frames</strong></p>
-        <p>Version 2.0.1 • August 2026 • Built with ❤️</p>
+        <p>Version 2.0.2 • August 2026 • Built with ❤️</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -407,7 +457,7 @@ Make recommendations specific, actionable, and enthusiastic!"""
         if st.session_state.get('last_recommendations'):
             st.markdown("### 🎯 Your Personalized 3P Recommendations")
             with st.container(border=True):
-                st.markdown(st.session_state.last_recommendations)
+                st.markdown(st.session_state.last_recommendations, unsafe_allow_html=True)
 
             st.markdown("---")
             col_a, col_b = st.columns(2)
@@ -512,7 +562,7 @@ Make recommendations specific, practical, and budget-conscious!"""
         if st.session_state.get('last_recommendations_dim'):
             st.markdown("### 🎯 Your Personalized 3P Recommendations")
             with st.container(border=True):
-                st.markdown(st.session_state.last_recommendations_dim)
+                st.markdown(st.session_state.last_recommendations_dim, unsafe_allow_html=True)
 
             st.markdown("---")
             col_a, col_b = st.columns(2)
@@ -616,7 +666,7 @@ Be creative, practical, and encouraging!"""
         if st.session_state.get('last_recommendations_draw'):
             st.markdown("### 🎯 Your Personalized 3P Recommendations")
             with st.container(border=True):
-                st.markdown(st.session_state.last_recommendations_draw)
+                st.markdown(st.session_state.last_recommendations_draw, unsafe_allow_html=True)
 
             st.markdown("---")
             col_a, col_b = st.columns(2)
