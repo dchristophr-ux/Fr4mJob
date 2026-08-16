@@ -129,14 +129,40 @@ def analyze_with_groq(prompt: str, image_base64: str = None) -> str:
             ]
             model = TEXT_MODEL
 
-        response = client.chat.completions.create(
+        request_kwargs = dict(
             model=model,
             messages=messages,
             temperature=0.7,
             max_completion_tokens=2048,
         )
+        # Qwen 3.6 has a "thinking" mode that can place the answer in a
+        # separate reasoning field and leave content empty. Ask for the
+        # direct answer only. (Groq ignores this on models without the option.)
+        if image_base64:
+            request_kwargs["reasoning_effort"] = "none"
 
-        return response.choices[0].message.content
+        try:
+            response = client.chat.completions.create(**request_kwargs)
+        except Exception:
+            # If the model rejects reasoning_effort, retry without it
+            request_kwargs.pop("reasoning_effort", None)
+            response = client.chat.completions.create(**request_kwargs)
+
+        msg = response.choices[0].message
+        text = (msg.content or "").strip()
+
+        # Fallback: some models put output in a reasoning field
+        if not text:
+            text = (getattr(msg, "reasoning", None) or "").strip()
+
+        if not text:
+            return (
+                "⚠️ The AI returned an empty response. This is usually temporary — "
+                "please click the button again. If it keeps happening, try a "
+                "smaller/clearer photo or use the Dimensions tab."
+            )
+
+        return text
 
     except Exception as e:
         return (
@@ -297,7 +323,7 @@ with st.sidebar:
     st.markdown("""
     <div style='text-align: center; color: #888; font-size: 0.85rem;'>
         <p><strong>Perfect Picture Frames</strong></p>
-        <p>Version 2.0 • August 2026 • Built with ❤️</p>
+        <p>Version 2.0.1 • August 2026 • Built with ❤️</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -380,7 +406,8 @@ Make recommendations specific, actionable, and enthusiastic!"""
     with col2:
         if st.session_state.get('last_recommendations'):
             st.markdown("### 🎯 Your Personalized 3P Recommendations")
-            st.markdown(f'<div class="recommendation-box">{st.session_state.last_recommendations}</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(st.session_state.last_recommendations)
 
             st.markdown("---")
             col_a, col_b = st.columns(2)
@@ -484,7 +511,8 @@ Make recommendations specific, practical, and budget-conscious!"""
     with col2:
         if st.session_state.get('last_recommendations_dim'):
             st.markdown("### 🎯 Your Personalized 3P Recommendations")
-            st.markdown(f'<div class="recommendation-box">{st.session_state.last_recommendations_dim}</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(st.session_state.last_recommendations_dim)
 
             st.markdown("---")
             col_a, col_b = st.columns(2)
@@ -587,7 +615,8 @@ Be creative, practical, and encouraging!"""
     with col2:
         if st.session_state.get('last_recommendations_draw'):
             st.markdown("### 🎯 Your Personalized 3P Recommendations")
-            st.markdown(f'<div class="recommendation-box">{st.session_state.last_recommendations_draw}</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(st.session_state.last_recommendations_draw)
 
             st.markdown("---")
             col_a, col_b = st.columns(2)
